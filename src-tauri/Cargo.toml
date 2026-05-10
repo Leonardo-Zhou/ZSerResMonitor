@@ -1,0 +1,21 @@
+[package]
+name = "z-server-res-usage-disp"
+version = "0.1.0"
+edition = "2021"
+
+[lib]
+name = "z_server_res_usage_disp_lib"
+crate-type = ["staticlib", "cdylib", "rlib"]
+
+[build-dependencies]
+tauri-build = { version = "2.3.0", features = [] }
+
+[dependencies]
+anyhow = "1.0"
+dirs = "6.0"
+serde = { version = "1.0", features = ["derive"] }
+serde_json = "1.0"
+tauri = { version = "2.6.0", features = [] }
+ssh2 = "0.9"
+tokio = { version = "1.46", features = ["rt", "time"] }
+uuid = { version = "1.17", features = ["v4", "serde"] }
