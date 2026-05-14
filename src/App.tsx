@@ -28,7 +28,7 @@ export default function App() {
   }, []);
 
   const refreshServer = useCallback(
-    async (server: ServerConfig, options: { quiet?: boolean } = {}) => {
+    async (server: ServerConfig, options: { quiet?: boolean; reconnect?: boolean } = {}) => {
       if (inFlightRef.current.has(server.id)) {
         return;
       }
@@ -40,7 +40,12 @@ export default function App() {
       }
 
       try {
-        const result = await fetchMetrics({ server, password: passwords[server.id] });
+        const request = { server, password: passwords[server.id] };
+        if (options.reconnect) {
+          await disconnectServer(server.id);
+          await connectServer(request);
+        }
+        const result = await fetchMetrics(request);
         setMetrics((current) => ({ ...current, [server.id]: result }));
       } catch (error) {
         if (!options.quiet) {
@@ -105,7 +110,7 @@ export default function App() {
   }
 
   async function refreshAll() {
-    await Promise.all(servers.map((server) => refreshServer(server)));
+    await Promise.all(servers.map((server) => refreshServer(server, { reconnect: true })));
   }
 
   async function testSelectedConnection(server: ServerConfig) {
@@ -207,7 +212,7 @@ export default function App() {
                   server={server}
                   metrics={metrics[server.id]}
                   busy={Boolean(busyServers[server.id])}
-                  onRefresh={refreshServer}
+                  onRefresh={(server) => refreshServer(server, { reconnect: true })}
                   onEdit={(target) => { setEditingServer(target); setShowForm(true); }}
                 />
               ) : (
@@ -216,7 +221,7 @@ export default function App() {
                   server={server}
                   metrics={metrics[server.id]}
                   busy={Boolean(busyServers[server.id])}
-                  onRefresh={refreshServer}
+                  onRefresh={(server) => refreshServer(server, { reconnect: true })}
                   onEdit={(target) => { setEditingServer(target); setShowForm(true); }}
                   onDelete={handleDelete}
                 />

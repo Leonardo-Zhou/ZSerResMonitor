@@ -30,6 +30,18 @@ export function ServerForm({ server, onSubmit, onCancel }: ServerFormProps) {
     setForm((current) => ({ ...current, [key]: value }));
   }
 
+  function stripOuterQuotes(value: string) {
+    const trimmed = value.trim();
+    if (trimmed.length >= 2) {
+      const first = trimmed[0];
+      const last = trimmed[trimmed.length - 1];
+      if ((first === '"' && last === '"') || (first === "'" && last === "'")) {
+        return trimmed.slice(1, -1);
+      }
+    }
+    return trimmed;
+  }
+
   function submit(event: FormEvent) {
     event.preventDefault();
     onSubmit(
@@ -38,7 +50,7 @@ export function ServerForm({ server, onSubmit, onCancel }: ServerFormProps) {
         name: form.name.trim() || form.host.trim(),
         host: form.host.trim(),
         username: form.username.trim(),
-        privateKeyPath: form.authType === "privateKey" ? form.privateKeyPath?.trim() || null : null,
+        privateKeyPath: form.authType === "privateKey" ? stripOuterQuotes(form.privateKeyPath ?? "") || null : null,
       },
       form.authType === "password" ? password : undefined,
     );
@@ -98,7 +110,7 @@ export function ServerForm({ server, onSubmit, onCancel }: ServerFormProps) {
           <input
             value={form.privateKeyPath ?? ""}
             onChange={(event) => update("privateKeyPath", event.target.value)}
-            placeholder="/Users/you/.ssh/id_rsa"
+            placeholder="/Users/you/.ssh/id_rsa 或 C:\\Users\\you\\.ssh\\id_rsa"
           />
         </label>
       ) : (

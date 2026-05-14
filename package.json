@@ -1,13 +1,14 @@
 {
   "name": "z-server-res-usage-disp",
   "private": true,
-  "version": "0.1.0",
+  "version": "1.0.2",
   "type": "module",
   "scripts": {
     "dev": "vite",
-    "build": "tsc && vite build",
+    "sync:version": "node scripts/sync-version.mjs",
+    "build": "npm run sync:version && tsc && vite build",
     "preview": "vite preview",
-    "tauri": "tauri"
+    "tauri": "npm run sync:version && tauri"
   },
   "dependencies": {
     "@tauri-apps/api": "^2.7.0",

@@ -2,7 +2,7 @@ use std::{
     collections::HashMap,
     io::Read,
     net::{TcpStream, ToSocketAddrs},
-    path::Path,
+    path::{Path, PathBuf},
     sync::{Arc, Mutex},
     time::Duration,
 };
@@ -54,36 +54,76 @@ impl SshManager {
 
     pub async fn run_or_connect(&self, request: ConnectionRequest, command: &str) -> Result<String> {
         let server_id = request.server.id.clone();
-        if !self.has_session(&server_id)? {
-            self.connect_server(request).await?;
+        let had_session = self.has_session(&server_id)?;
+        if !had_session {
+            self.connect_server(request.clone()).await?;
         }
-        self.run_remote_command(&server_id, command).await
+
+        match self.run_remote_command(&server_id, command).await {
+            Ok(output) => Ok(output),
+            Err(error) if had_session && should_retry_with_reconnect(&error) => {
+                self.invalidate_session(&server_id)?;
+                self.connect_server(request).await?;
+                self.run_remote_command(&server_id, command).await
+            }
+            Err(error) => Err(error),
+        }
     }
 
     async fn run_remote_command(&self, server_id: &str, command: &str) -> Result<String> {
-        let sessions = Arc::clone(&self.sessions);
-        let server_id = server_id.to_string();
-        let command = command.to_string();
+        let mut managed = {
+            let mut sessions = self.sessions.lock().map_err(|_| anyhow!("SSH 会话池锁定失败"))?;
+            sessions.remove(server_id).ok_or_else(|| anyhow!("服务器尚未连接"))?
+        };
 
-        timeout(
+        let command = command.to_string();
+        let result = timeout(
             SSH_TIMEOUT,
             tokio::task::spawn_blocking(move || {
-                let mut sessions = sessions.lock().map_err(|_| anyhow!("SSH 会话池锁定失败"))?;
-                let managed = sessions
-                    .get_mut(&server_id)
-                    .ok_or_else(|| anyhow!("服务器尚未连接"))?;
-                run_remote_command_blocking(&mut managed.session, &command)
+                let output = run_remote_command_blocking(&mut managed.session, &command);
+                (managed, output)
             }),
         )
-        .await
-        .context("SSH 命令超时")?
-        .context("SSH 任务执行失败")?
+        .await;
+
+        match result {
+            Ok(join_result) => {
+                let (managed, output) = join_result.context("SSH 任务执行失败")?;
+                if output.is_ok() {
+                    let mut sessions = self.sessions.lock().map_err(|_| anyhow!("SSH 会话池锁定失败"))?;
+                    sessions.insert(server_id.to_string(), managed);
+                }
+                output
+            }
+            Err(error) => Err(error).context("SSH 命令超时"),
+        }
     }
 
     fn has_session(&self, server_id: &str) -> Result<bool> {
         let sessions = self.sessions.lock().map_err(|_| anyhow!("SSH 会话池锁定失败"))?;
         Ok(sessions.contains_key(server_id))
     }
+
+    fn invalidate_session(&self, server_id: &str) -> Result<()> {
+        let mut sessions = self.sessions.lock().map_err(|_| anyhow!("SSH 会话池锁定失败"))?;
+        sessions.remove(server_id);
+        Ok(())
+    }
+}
+
+fn should_retry_with_reconnect(error: &anyhow::Error) -> bool {
+    let message = error.to_string();
+    [
+        "SSH 会话已断开",
+        "创建 SSH 通道失败",
+        "执行远程命令失败",
+        "读取远程命令输出失败",
+        "关闭 SSH 通道失败",
+        "SSH 命令超时",
+        "SSH 任务执行失败",
+    ]
+    .iter()
+    .any(|part| message.contains(part))
 }
 
 async fn create_session(server: ServerConfig, password: Option<String>) -> Result<Session> {
@@ -141,6 +181,57 @@ fn run_remote_command_blocking(session: &mut Session, command: &str) -> Result<S
     }
 }
 
+fn resolve_private_key_path(raw: &str) -> Result<PathBuf> {
+    let trimmed = raw.trim();
+    let unquoted = strip_outer_quotes(trimmed);
+    let expanded = expand_home(unquoted)?;
+    let mut candidates = vec![expanded];
+
+    if cfg!(windows) && unquoted.contains("\\\\") {
+        candidates.push(expand_home(&unquoted.replace("\\\\", "\\"))?);
+    }
+
+    for candidate in &candidates {
+        if candidate.exists() {
+            if !candidate.is_file() {
+                return Err(anyhow!("私钥路径不是文件: {}", candidate.display()));
+            }
+            return Ok(candidate.canonicalize().unwrap_or_else(|_| candidate.clone()));
+        }
+    }
+
+    let display_path = candidates
+        .first()
+        .map(|path| path.display().to_string())
+        .unwrap_or_else(|| unquoted.to_string());
+    Err(anyhow!("私钥文件不存在: {}", display_path))
+}
+
+fn strip_outer_quotes(value: &str) -> &str {
+    if value.len() >= 2 {
+        let bytes = value.as_bytes();
+        let first = bytes[0];
+        let last = bytes[value.len() - 1];
+        if (first == b'\"' && last == b'\"') || (first == b'\'' && last == b'\'') {
+            return &value[1..value.len() - 1];
+        }
+    }
+    value
+}
+
+fn expand_home(path: &str) -> Result<PathBuf> {
+    if path == "~" {
+        return dirs::home_dir().ok_or_else(|| anyhow!("无法解析当前用户主目录"));
+    }
+
+    if let Some(rest) = path.strip_prefix("~/").or_else(|| path.strip_prefix("~\\")) {
+        let home = dirs::home_dir().ok_or_else(|| anyhow!("无法解析当前用户主目录"))?;
+        return Ok(home.join(rest));
+    }
+
+    Ok(Path::new(path).to_path_buf())
+}
+
 fn authenticate(server: &ServerConfig, password: Option<&str>, session: &Session) -> Result<()> {
     match server.auth_type {
         AuthType::Password => {
@@ -157,8 +248,9 @@ fn authenticate(server: &ServerConfig, password: Option<&str>, session: &Session
                 .as_deref()
                 .filter(|value| !value.trim().is_empty())
                 .ok_or_else(|| anyhow!("密钥登录需要提供私钥路径"))?;
+            let private_key_path = resolve_private_key_path(path)?;
             session
-                .userauth_pubkey_file(&server.username, None, Path::new(path), password)
+                .userauth_pubkey_file(&server.username, None, &private_key_path, password)
                 .context("SSH 密钥认证失败")?;
         }
     }
